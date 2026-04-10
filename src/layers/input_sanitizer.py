@@ -52,7 +52,7 @@ class InputSanitizer(DefenseLayer):
 
         #calls ollama server
         response = ollama.chat(
-            model="shieldgemma:4b",
+            model="shieldgemma:2b",
 
             #conversation is a list for a chat format
             messages=[
