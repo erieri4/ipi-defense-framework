@@ -3,7 +3,7 @@ agent:
   temperature: 0
 
 classifier:
-  model_name: "shieldgemma:4b"
+  model_name: "shieldgemma:2b"
   temperature: 0
 
 judge:
