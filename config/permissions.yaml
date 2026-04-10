@@ -1,0 +1,29 @@
+
+# low risk tools
+tools:
+  email_reader:
+    description: "Read and extract information from emails."
+    risk_level: "low"
+    allowed_trust_levels: ["trusted", "semi-trusted", "untrusted"]
+
+  search_engine:
+    description: "Search the web for information."
+    risk_level: "low"
+    allowed_trust_levels: ["trusted", "semi-trusted", "untrusted"]
+
+
+# high risk tools
+  delete_file:
+    description: "Delete files from the system."
+    risk_level: "high"
+    allowed_trust_levels: ["trusted"]
+
+  send_email:
+    description: "Send emails."
+    risk_level: "high"
+    allowed_trust_levels: ["trusted"]
+
+  transfer_funds:
+    description: "Transfer funds between accounts."
+    risk_level: "high"
+    allowed_trust_levels: ["trusted"]
