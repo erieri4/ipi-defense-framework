@@ -1,0 +1,12 @@
+agent:
+  model_name: "llama3.2"
+  temperature: 0
+
+classifier:
+  model_name: "shieldgemma:2b"
+  temperature: 0
+
+judge:
+model_name: "deepseek-r1:7b"
+temperature: 0
+
