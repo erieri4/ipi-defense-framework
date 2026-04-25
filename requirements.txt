@@ -10,3 +10,5 @@ matplotlib
 seaborn
 pyyaml
 pytest
+fastapi
+uvicorn
