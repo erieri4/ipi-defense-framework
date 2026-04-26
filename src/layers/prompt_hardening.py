@@ -40,7 +40,7 @@ class PromptHardening(DefenseLayer):
             
             start_tag = f"<{DELIMITER_TAG_BASE}_{nonce}>"
             end_tag = f"</{DELIMITER_TAG_BASE}_{nonce}>"
-            working_text = f"{SYSTEM_INSTRUCTION}\n{start_tag} {working_text}\n{end_tag}"
+            working_text = f"{SYSTEM_INSTRUCTION}\n{start_tag}\n{working_text}\n{end_tag}"
 
             checks.append( {
             "id" : "delimiters",
@@ -55,7 +55,8 @@ class PromptHardening(DefenseLayer):
         
         if self.mode in {"sandwich", "combined"}:
             if user_query:
-                suffix =SANDWICH_TEMPLATE.format(user_query=user_query)
+                clean_query = user_query.rstrip(".!?")
+                suffix = SANDWICH_TEMPLATE.format(user_query=clean_query)
                 working_text = f"{working_text}\n\n{suffix}"
                 checks.append({
                     "id" : "sandwich",

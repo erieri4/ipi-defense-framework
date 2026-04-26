@@ -1,3 +1,5 @@
+from unittest import result
+
 import pytest
 from src.layers.prompt_hardening import PromptHardening, DELIMITER_TAG_BASE, SYSTEM_INSTRUCTION
 from src.layers.prompt_hardening import (
@@ -29,10 +31,10 @@ def test_nonce_is_random_per_call():
 def test_sandwich_is_last_in_output():
     layer = PromptHardening(mode="sandwich")
     
-    result = layer.analyze("Some tool output.", user_query="Summarize my email.")
+    result = layer.analyze("Some tool output.", user_query="Summarize my email")
     output = result["output"]
-    
-    expected_suffix = SANDWICH_TEMPLATE.format(user_query="Summarize my email.")
+
+    expected_suffix = SANDWICH_TEMPLATE.format(user_query="Summarize my email")
     assert output.endswith(expected_suffix)
 
 def test_combined_mode_order():
