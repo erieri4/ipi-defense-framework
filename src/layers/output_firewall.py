@@ -11,6 +11,7 @@ import re
 
 
 class OutputFirewall(DefenseLayer):
+    
     def __init__(self,enabled: bool = True, judge_model_name: str = "deepseek-r1:7b"):
         super().__init__(name = "OutputFirewall", enabled=enabled)
         if judge_model_name is None:
@@ -118,7 +119,7 @@ class OutputFirewall(DefenseLayer):
         
     
     def _parse_verdict(self,response: str)-> dict:
-        matches = list(re.finditer(r"VERDICT:\s*(ALLOW|BLOCK)", response))
+        matches = list(re.finditer(r"VERDICT:\s*(ALLOW|BLOCK)", response, re.IGNORECASE))
         if not matches:
             raise ValueError("No verdict found in judge response.")
         else:
