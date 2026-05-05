@@ -40,7 +40,7 @@ class PromptHardening(DefenseLayer):
             
             start_tag = f"<{DELIMITER_TAG_BASE}_{nonce}>"
             end_tag = f"</{DELIMITER_TAG_BASE}_{nonce}>"
-            working_text = f"{SYSTEM_INSTRUCTION}\n{start_tag}\n{working_text}\n{end_tag}"
+            working_text = f"{SYSTEM_INSTRUCTION}\n{start_tag}{working_text}\n{end_tag}"
 
             checks.append( {
             "id" : "delimiters",
