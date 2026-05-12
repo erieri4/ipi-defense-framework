@@ -1,0 +1,171 @@
+# ─────────────────────────────────────────────────────────────
+# Layer 4: Tool Privilege Control — Permissions Database
+# ─────────────────────────────────────────────────────────────
+# Read by: src/layers/tool_privilege.py
+#
+# This file declares the static permissions for every tool the
+# agent can call. The decorator in tool_privilege.py enforces
+# these rules at runtime — the LLM is never asked for permission.
+# ─────────────────────────────────────────────────────────────
+
+
+# Trust hierarchy, ordered from least trusted to most trusted.
+# The decorator compares the current TrustContext level against
+# each tool's `trust_required` field.
+#
+#   none          → Layer 1 flagged an injection. No tools allowed
+#                   except pure read-only internal lookups.
+#   untrusted     → Agent is processing data from external sources
+#                   (emails, web pages, third-party APIs).
+#   semi-trusted  → Agent is processing data from internal/verified
+#                   sources (own calendar, own files).
+#   trusted       → Agent is acting on the user's direct query,
+#                   before any external data has been read.
+trust_levels:
+  - none
+  - untrusted
+  - semi-trusted
+  - trusted
+
+
+# Risk categories — used as labels for evaluation/analysis only.
+# These are NOT used by the decorator for authorization decisions.
+risk_levels:
+  - read-only          # Reads data, no side effects
+  - write-internal     # Writes to user's own storage
+  - write-external     # Sends data to external parties
+  - destructive        # Irreversible operations
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool registry
+# ─────────────────────────────────────────────────────────────
+# Each tool declares:
+#   description          → one-sentence summary
+#   risk_level           → label for analysis (see risk_levels above)
+#   trust_required       → minimum TrustContext level to call this tool
+#   downgrade_on_output  → trust level to ratchet down to after the
+#                          tool returns; null if the tool does not
+#                          introduce untrusted data
+# ─────────────────────────────────────────────────────────────
+
+tools:
+
+  # ── Read-only tools that fetch EXTERNAL data ──────────────
+  # Safe to call at any trust level, but their output downgrades
+  # the context because attackers can control what they return.
+
+  read_email:
+    description: "Read the body and metadata of a single email by ID."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: untrusted
+
+  list_emails:
+    description: "List emails in a mailbox folder."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: untrusted
+
+  search_emails:
+    description: "Search emails by keyword or sender."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: untrusted
+
+  web_search:
+    description: "Search the web for information."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: untrusted
+
+  fetch_url:
+    description: "Fetch the content of a URL."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: untrusted
+
+
+  # ── Read-only tools that fetch INTERNAL data ──────────────
+  # Safe to call at any trust level. Output is trustworthy
+  # (no attacker-controllable content), so no downgrade.
+
+  list_files:
+    description: "List files in a directory."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: null
+
+  get_calendar_events:
+    description: "Retrieve calendar events for a given date range."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: null
+
+  list_contacts:
+    description: "List entries in the user's address book."
+    risk_level: read-only
+    trust_required: untrusted
+    downgrade_on_output: null
+
+
+  # ── Write tools (internal scope) ──────────────────────────
+  # Modifies the user's own data. Requires that the agent has
+  # not yet processed any untrusted external content.
+
+  create_calendar_event:
+    description: "Create a new calendar event."
+    risk_level: write-internal
+    trust_required: semi-trusted
+    downgrade_on_output: null
+
+  write_file:
+    description: "Write or overwrite a file in the user's storage."
+    risk_level: write-internal
+    trust_required: semi-trusted
+    downgrade_on_output: null
+
+  create_contact:
+    description: "Add a new contact to the address book."
+    risk_level: write-internal
+    trust_required: semi-trusted
+    downgrade_on_output: null
+
+
+  # ── Write tools (external scope) ──────────────────────────
+  # Sends data outside the user's boundary. Only callable when
+  # the agent is acting on the user's direct, uncorrupted query.
+
+  send_email:
+    description: "Send an email to a recipient."
+    risk_level: write-external
+    trust_required: trusted
+    downgrade_on_output: null
+
+  reply_email:
+    description: "Reply to an existing email."
+    risk_level: write-external
+    trust_required: trusted
+    downgrade_on_output: null
+
+
+  # ── Destructive tools ─────────────────────────────────────
+  # Irreversible operations. Strictest trust requirement.
+
+  delete_email:
+    description: "Permanently delete an email."
+    risk_level: destructive
+    trust_required: trusted
+    downgrade_on_output: null
+
+  delete_file:
+    description: "Permanently delete a file."
+    risk_level: destructive
+    trust_required: trusted
+    downgrade_on_output: null
+
+  transfer_funds:
+    description: "Transfer funds between accounts."
+    risk_level: destructive
+    trust_required: trusted
+    downgrade_on_output: null

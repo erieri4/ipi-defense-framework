@@ -3,6 +3,7 @@ import os
 import re
 from typing import Dict, List
 import torch
+from src.layers.tool_privilege import downgrade_current_context
 
 
 ATTACK_PATTERNS = [
@@ -71,6 +72,7 @@ class InputSanitizer(DefenseLayer):
                             "detail": "Skipped because regex validation already blocked the prompt.",
                         }
                     )
+                downgrade_current_context("none", reason=f"Layer 1 regex match: {regex_check['detail']}")
                 return self._build_result(text, BLOCKED_MESSAGE, "blocked", regex_check["detail"], checks)
 
             if self.mode == "regex":
@@ -87,6 +89,7 @@ class InputSanitizer(DefenseLayer):
             checks.append(llm_check)
 
             if llm_check["status"] == "blocked":
+                downgrade_current_context("none", reason=f"Layer 1 regex match: {regex_check['detail']}")
                 return self._build_result(text, BLOCKED_MESSAGE, "blocked", llm_check["detail"], checks)
 
             if llm_check["status"] == "error":
