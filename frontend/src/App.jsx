@@ -48,7 +48,7 @@ const initialMessages = [
   {
     id: "assistant-intro",
     role: "assistant",
-    text: "Send a prompt to see how it moves through the first defense layer.",
+    text: "Send a prompt to see how it moves through every defense layer.",
   },
 ];
 
@@ -295,9 +295,9 @@ export default function App() {
             </div>
             <div className={`final-pill final-${finalStatus}`}>
               {finalStatus === "idle" && "Awaiting prompt"}
-              {finalStatus === "blocked" && "Stopped at layer 1"}
-              {finalStatus === "error" && "Layer 1 unavailable"}
-              {finalStatus === "ready" && "Ready for layer 2"}
+              {finalStatus === "blocked" && "Blocked by defense pipeline"}
+              {finalStatus === "error" && "Pipeline error"}
+              {finalStatus === "ready" && "Passed all layers"}
             </div>
           </div>
 
@@ -323,11 +323,11 @@ export default function App() {
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Type a prompt to send through the first layer..."
+              placeholder="Type a prompt to send through the defense pipeline..."
               rows={4}
             />
             <div className="composer-footer">
-              <p>The prompt is immediately checked by Layer 1 on submit.</p>
+              <p>The prompt runs through every defense layer on submit.</p>
               <button type="submit" disabled={!canSubmit || isValidating}>
                 {isValidating ? "Validating..." : "Send"}
               </button>

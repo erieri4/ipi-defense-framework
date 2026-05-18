@@ -1,5 +1,3 @@
-
-
 from src.layers.base import DefenseLayer
 
 class DefensePipeline:
@@ -104,21 +102,37 @@ class DefensePipeline:
             "layer_results": layer_results,
         }
         
-    def check_action(self, user_query: str, tool_name: str, tool_args: dict | None = None) -> dict:
+    def check_action(
+        self,
+        user_query: str,
+        tool_name: str,
+        tool_args: dict | None = None,
+        tool_output: str | None = None,
+    ) -> dict:
+        """
+        Run Layer 3 (OutputFirewall) on a proposed agent action.
+
+        `tool_output` is the most recent tool result the agent saw — passing
+        it lets the judge detect semantic injections that live in tool output
+        rather than in the proposed arguments. It is optional for backward
+        compatibility: if omitted, the firewall judges from query + action
+        only, which is weaker but still functional.
+        """
         layer_results = []
 
         l3 = self._get("OutputFirewall")
         if l3 is not None:
-            l3_result = self._safe_analyze(l3, user_query, tool_name, tool_args)
+            # _safe_analyze forwards *args — Layer 3.analyze() receives all four.
+            l3_result = self._safe_analyze(l3, user_query, tool_name, tool_args, tool_output)
 
             layer_results.append(l3_result)
             self._run_log.append(l3_result)
 
             return {
-            "stage": l3.name,
-            "verdict": l3_result["verdict"],
-            "blocked": l3_result["blocked"],
-            "layer_results": layer_results,
+                "stage": l3.name,
+                "verdict": l3_result.get("verdict"),
+                "blocked": l3_result["blocked"],
+                "layer_results": layer_results,
             }
         
         return {
@@ -130,6 +144,7 @@ class DefensePipeline:
     
     def collect_report(self) -> dict:
         # --- Layer 1: filter _run_log for L1 entries ---
+        # L1 is the only layer that produces "normalized_input".
         l1 = self._get("InputSanitizer")
         if l1 is None:
             l1_report = "not_present"
@@ -138,14 +153,20 @@ class DefensePipeline:
             l1_report = entries if entries else "not_called_during_run"
 
         # --- Layer 2 ---
+        # Both L2 and L3 result dicts contain "user_query", so we
+        # disambiguate by requiring the absence of "verdict" (L3-only key).
         l2 = self._get("PromptHardening")
         if l2 is None:
-           l2_report = "not_present"
+            l2_report = "not_present"
         else:
-           entries = [r for r in self._run_log if "user_query" in r]
-           l2_report = entries if entries else "not_called_during_run"
+            entries = [
+                r for r in self._run_log
+                if "user_query" in r and "verdict" not in r
+            ]
+            l2_report = entries if entries else "not_called_during_run"
 
         # --- Layer 3 ---
+        # L3 is the only layer whose result dict contains "verdict".
         l3 = self._get("OutputFirewall")
         if l3 is None:
             l3_report = "not_present"
@@ -173,7 +194,3 @@ class DefensePipeline:
             "per_call_log":     list(self._run_log),
             "any_blocked":      any_blocked,
         }
-
-
-
-

