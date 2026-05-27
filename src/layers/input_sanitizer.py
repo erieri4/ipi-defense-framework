@@ -89,7 +89,7 @@ class InputSanitizer(DefenseLayer):
             checks.append(llm_check)
 
             if llm_check["status"] == "blocked":
-                downgrade_current_context("none", reason=f"Layer 1 regex match: {regex_check['detail']}")
+                downgrade_current_context("none", reason=f"Layer 1 LLM classifier: {llm_check['detail']}")
                 return self._build_result(text, BLOCKED_MESSAGE, "blocked", llm_check["detail"], checks)
 
             if llm_check["status"] == "error":

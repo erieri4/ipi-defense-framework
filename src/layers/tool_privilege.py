@@ -194,13 +194,13 @@ class ToolPrivilege(DefenseLayer):
                 "decisions_log": list(_decisions_log),
             }
         
-        # Case 2: no active run and nothing logged → error
+        # Case 2: no active run and nothing logged → no tool calls were made
         if self._context is None and len(_decisions_log) == 0:
             return {
                 "input": "<agent run summary>",
-                "output": "<no decisions>",
-                "status": "error",
-                "detail": "analyze() called without an active run; call start_run() first.",
+                "output": "0 allowed, 0 blocked",
+                "status": "passed",
+                "detail": "Run completed; no tool calls were made.",
                 "checks": [],
                 "blocked": False,
                 "trust_history": [],

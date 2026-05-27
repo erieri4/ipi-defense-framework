@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,7 +16,7 @@ app = FastAPI(title="IPI Defense API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:4173", "http://localhost:4173", "http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=["http://127.0.0.1:4173", "http://localhost:4173", "http://127.0.0.1:5173", "http://localhost:5173", "http://10.10.1.10:4173", "http://10.10.1.10:4174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,7 +29,7 @@ class ValidateRequest(BaseModel):
 
 sanitizer = InputSanitizer(mode="combined")
 hardener = PromptHardening(mode="combined")
-firewall = OutputFirewall()
+firewall = OutputFirewall(request_timeout_s=300.0)
 tool_privilege = ToolPrivilege()
 
 pipeline = DefensePipeline([sanitizer, hardener, firewall, tool_privilege])

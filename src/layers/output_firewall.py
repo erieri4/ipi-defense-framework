@@ -2,22 +2,26 @@
 Layer 3: Output Firewall (The Judge)
 ------------------------------------
 
-
-This implementation calls Ollama locally. The judge model is configurable; default is "deepseek-r1:7b"
-
+Calls any OpenAI-compatible endpoint. Configured via JUDGE_API_BASE and JUDGE_MODEL env vars.
 """
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import os
 import re
 import time
+import urllib.request
 from typing import Optional
 
-import ollama
+import openai
 
 from src.layers.base import DefenseLayer
 from src.utils.prompts import JUDGE_PROMPT_TEMPLATE
+
+_DEFAULT_API_BASE = "http://localhost:11434/v1"
+_DEFAULT_MODEL = "qwen3:30b"
 
 logger = logging.getLogger(__name__)
 
@@ -50,26 +54,30 @@ class OutputFirewall(DefenseLayer):
     def __init__(
         self,
         enabled: bool = True,
-        judge_model_name: str = "deepseek-r1:7b",
-        ollama_host: Optional[str] = None,
+        judge_model_name: Optional[str] = None,
+        api_base: Optional[str] = None,
         temperature: float = 0.0,
-        num_predict: int = 512,
+        num_predict: int = 2048,
         request_timeout_s: float = 60.0,
         max_retries: int = 1,
     ):
         super().__init__(name="OutputFirewall", enabled=enabled)
-        if not judge_model_name:
+
+        self.judge_model_name = judge_model_name or os.environ.get("JUDGE_MODEL", _DEFAULT_MODEL)
+        if not self.judge_model_name:
             raise ValueError("judge_model_name must be a non-empty string.")
 
-        self.judge_model_name = judge_model_name
         self.temperature = temperature
         self.num_predict = num_predict
         self.request_timeout_s = request_timeout_s
         self.max_retries = max_retries
 
-        # ollama.Client accepts host=... ; if None, it uses OLLAMA_HOST env or
-        # the default http://localhost:11434
-        self._client = ollama.Client(host=ollama_host) if ollama_host else ollama.Client()
+        self._api_base = api_base or os.environ.get("JUDGE_API_BASE", _DEFAULT_API_BASE)
+        self._client = openai.OpenAI(
+            base_url=self._api_base,
+            api_key=os.environ.get("JUDGE_API_KEY", "ollama"),
+            timeout=request_timeout_s,
+        )
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -186,33 +194,36 @@ class OutputFirewall(DefenseLayer):
         return JUDGE_PROMPT_TEMPLATE.format(**format_kwargs)
 
     # ------------------------------------------------------------------ #
-    # Judge call (real Ollama)
+    # Judge call
     # ------------------------------------------------------------------ #
     def _call_judge(self, prompt: str) -> str:
-        """
-        Send the prompt to the Ollama judge model. Returns the raw text
-        response. Raises on connection / timeout errors so analyze() can
-        record them as call_error.
-        """
-        response = self._client.chat(
+        response = self._client.chat.completions.create(
             model=self.judge_model_name,
             messages=[{"role": "user", "content": prompt}],
-            options={
-                "temperature": self.temperature,  # 0.0 for reproducibility
-                "num_predict": self.num_predict,
-            },
-            # ollama-python supports keep_alive but not a per-call timeout
-            # directly; we rely on Ollama server defaults. If you need a
-            # hard timeout on the school server, wrap this in a separate
-            # process / signal-based timeout.
+            temperature=self.temperature,
+            max_tokens=self.num_predict,
         )
-        # Defensive extraction — ollama-python returns dict-like with a
-        # "message" key, but Response objects from newer versions support
-        # attribute access too.
-        try:
-            return response["message"]["content"]
-        except (TypeError, KeyError):
-            return response.message.content  # type: ignore[attr-defined]
+        content = response.choices[0].message.content
+        if not content:
+            content = self._call_ollama_native(prompt)
+        return content
+
+    def _call_ollama_native(self, prompt: str) -> str:
+        base = self._api_base.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        url = f"{base}/api/chat"
+        payload = _json.dumps({
+            "model": self.judge_model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "think": False,
+            "stream": False,
+            "options": {"num_predict": self.num_predict, "temperature": self.temperature},
+        }).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.request_timeout_s) as resp:
+            data = _json.loads(resp.read())
+        return data["message"]["content"]
 
     # ------------------------------------------------------------------ #
     # Verdict parsing
